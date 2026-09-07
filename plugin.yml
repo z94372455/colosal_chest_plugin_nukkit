@@ -1,0 +1,16 @@
+name: ColossalChest
+main: com.example.colossalchest.ColossalChestPlugin
+version: 1.0.0
+api: ["1.0.0"]
+author: Dev
+description: Плагін для створення колосальних скринь зі сторінковим перемиканням
+
+commands:
+  givecolossal:
+    description: Видати колосальну скриню або ендер-скриню гравцю
+    permission: colossalchest.admin
+    aliases: ["givechest"]
+
+permissions:
+  colossalchest.admin:
+    default: op
