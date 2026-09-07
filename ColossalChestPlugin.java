@@ -6,6 +6,8 @@ import cn.nukkit.command.Command;
 import cn.nukkit.command.CommandSender;
 import cn.nukkit.event.EventHandler;
 import cn.nukkit.event.Listener;
+import cn.nukkit.event.block.BlockBreakEvent;
+import cn.nukkit.event.block.BlockPlaceEvent;
 import cn.nukkit.event.inventory.InventoryClickEvent;
 import cn.nukkit.event.inventory.InventoryCloseEvent;
 import cn.nukkit.event.player.PlayerInteractEvent;
@@ -36,6 +38,8 @@ public class ColossalChestPlugin extends PluginBase implements Listener {
     private static final int AUTOSAVE_TICKS = 20 * 60;
 
     private final Map<UUID, InventoryStorage> chests = new HashMap<>();
+    private final Map<UUID, Integer> chestCapacities = new HashMap<>();
+    private final Map<String, UUID> chestLocations = new HashMap<>();
     private final Map<Inventory, MenuSession> menus = new IdentityHashMap<>();
 
     @Override
@@ -79,36 +83,63 @@ public class ColossalChestPlugin extends PluginBase implements Listener {
         }
 
         boolean ender = args.length >= 3 && args[2].equalsIgnoreCase("ender");
-        int chestId = ender ? BlockID.ENDER_CHEST : BlockID.CHEST;
-        Item chest = Item.get(chestId);
-        chest.setCustomName(TextFormat.BOLD + "" + TextFormat.GOLD + (ender ? "Колосальна ендер-скриня" : "Колосальна скриня") + " (" + capacity + " слотів)");
-        CompoundTag tag = chest.getNamedTag();
-        if (tag == null) tag = new CompoundTag();
-        tag.putInt("ColossalCapacity", capacity);
-        tag.putString("ChestUUID", UUID.randomUUID().toString());
-        tag.putString("ChestType", ender ? "ender" : "normal");
-        chest.setNamedTag(tag);
+        Item chest = createChestItem(capacity, ender, UUID.randomUUID());
         target.getInventory().addItem(chest);
         sender.sendMessage(TextFormat.GREEN + (ender ? "Ендер-скриню" : "Скриню") + " на " + capacity + " слотів видано гравцю " + target.getName());
         return true;
     }
 
+    private Item createChestItem(int capacity, boolean ender, UUID chestId) {
+        Item chest = Item.get(ender ? BlockID.ENDER_CHEST : BlockID.CHEST);
+        chest.setCustomName(TextFormat.BOLD + "" + TextFormat.GOLD + (ender ? "Колосальна ендер-скриня" : "Колосальна скриня") + " (" + capacity + " слотів)");
+        CompoundTag tag = chest.getNamedTag();
+        if (tag == null) tag = new CompoundTag();
+        tag.putInt("ColossalCapacity", capacity);
+        tag.putString("ChestUUID", chestId.toString());
+        tag.putString("ChestType", ender ? "ender" : "normal");
+        chest.setNamedTag(tag);
+        return chest;
+    }
+
     @EventHandler
-    public void onInteract(PlayerInteractEvent event) {
-        if (event.getAction() != PlayerInteractEvent.Action.RIGHT_CLICK_BLOCK) return;
+    public void onPlace(BlockPlaceEvent event) {
         Item item = event.getItem();
         if (item == null || (item.getId() != BlockID.CHEST && item.getId() != BlockID.ENDER_CHEST) || !item.hasCompoundTag()) return;
-
         CompoundTag tag = item.getNamedTag();
         if (!tag.contains("ColossalCapacity") || !tag.contains("ChestUUID")) return;
         try {
             UUID chestId = UUID.fromString(tag.getString("ChestUUID"));
             int capacity = tag.getInt("ColossalCapacity");
-            event.setCancelled(true);
-            openColossalMenu(event.getPlayer(), chestId, capacity, 1);
+            chestCapacities.put(chestId, capacity);
+            chests.computeIfAbsent(chestId, id -> new InventoryStorage(capacity));
+            chestLocations.put(locationKey(event.getBlock()), chestId);
         } catch (IllegalArgumentException ignored) {
             // Ignore a chest with a damaged UUID instead of crashing the event handler.
         }
+    }
+
+    @EventHandler
+    public void onInteract(PlayerInteractEvent event) {
+        if (event.getAction() != PlayerInteractEvent.Action.RIGHT_CLICK_BLOCK) return;
+        UUID chestId = chestLocations.get(locationKey(event.getBlock()));
+        if (chestId == null) return;
+        event.setCancelled(true);
+        openColossalMenu(event.getPlayer(), chestId, chestCapacities.get(chestId), 1);
+    }
+
+    @EventHandler
+    public void onBreak(BlockBreakEvent event) {
+        UUID chestId = chestLocations.remove(locationKey(event.getBlock()));
+        if (chestId == null) return;
+        Integer capacity = chestCapacities.remove(chestId);
+        if (capacity != null) {
+            event.setDrops(new Item[]{createChestItem(capacity, event.getBlock().getId() == BlockID.ENDER_CHEST, chestId)});
+        }
+        chests.remove(chestId);
+    }
+
+    private String locationKey(cn.nukkit.block.Block block) {
+        return block.getLevel().getName() + ":" + block.getFloorX() + ":" + block.getFloorY() + ":" + block.getFloorZ();
     }
 
     private void openColossalMenu(Player player, UUID chestId, int capacity, int page) {
@@ -188,6 +219,18 @@ public class ColossalChestPlugin extends PluginBase implements Listener {
                 }
                 slots.add(saved);
             }
+            Integer capacity = chestCapacities.get(entry.getKey());
+            if (capacity != null) getConfig().set("chests." + entry.getKey() + ".capacity", capacity);
+            for (Map.Entry<String, UUID> location : chestLocations.entrySet()) {
+                if (location.getValue().equals(entry.getKey())) {
+                    String[] parts = location.getKey().split(":", 4);
+                    getConfig().set("chests." + entry.getKey() + ".location.level", parts[0]);
+                    getConfig().set("chests." + entry.getKey() + ".location.x", Integer.parseInt(parts[1]));
+                    getConfig().set("chests." + entry.getKey() + ".location.y", Integer.parseInt(parts[2]));
+                    getConfig().set("chests." + entry.getKey() + ".location.z", Integer.parseInt(parts[3]));
+                    break;
+                }
+            }
             getConfig().set("chests." + entry.getKey() + ".slots", slots);
         }
         saveConfig();
@@ -213,6 +256,15 @@ public class ColossalChestPlugin extends PluginBase implements Listener {
                     storage.setItem(slot, Item.get(itemId, damage, count, nbt));
                 }
                 chests.put(chestId, storage);
+                int capacity = getConfig().getInt("chests." + id + ".capacity", slots.size());
+                chestCapacities.put(chestId, capacity);
+                String level = getConfig().getString("chests." + id + ".location.level", "");
+                if (!level.isEmpty()) {
+                    String location = level + ":" + getConfig().getInt("chests." + id + ".location.x") + ":"
+                            + getConfig().getInt("chests." + id + ".location.y") + ":"
+                            + getConfig().getInt("chests." + id + ".location.z");
+                    chestLocations.put(location, chestId);
+                }
             } catch (RuntimeException ignored) {
                 getLogger().warning("Не вдалося завантажити колосальну скриню " + id);
             }
